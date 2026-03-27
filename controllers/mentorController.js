@@ -1,4 +1,9 @@
-import pool from '../config/db.js';
+import Startup from '../models/Startup.js';
+import MentorAssignment from '../models/MentorAssignment.js';
+import Feedback from '../models/Feedback.js';
+import ProgressUpdate from '../models/ProgressUpdate.js';
+import User from '../models/User.js';
+import DeveloperTask from '../models/DeveloperTask.js';
 
 // @desc    Get assigned startups for mentor
 // @route   GET /api/mentor/startups
@@ -6,20 +11,24 @@ import pool from '../config/db.js';
 export const getAssignedStartups = async (req, res, next) => {
     try {
         const mentor_id = req.user.id;
-        const query = `
-            SELECT s.*, m.id as assignment_id
-            FROM startups s
-            JOIN mentor_assignments m ON s.id = m.startup_id
-            WHERE m.mentor_id = ?
-        `;
-        const [startups] = await pool.query(query, [mentor_id]);
+        
+        const assignments = await MentorAssignment.find({ mentor_id }).populate('startup_id').lean();
+        
+        const startups = assignments
+            .filter(a => a.startup_id)
+            .map(a => ({
+                ...a.startup_id,
+                id: a.startup_id._id,
+                assignment_id: a._id
+            }));
+
         res.status(200).json({ success: true, count: startups.length, data: startups });
     } catch (error) {
         next(error);
     }
 };
 
-// @desc    Provide feedback (Using mentor_assignments table to store latest feedback for simplicity or a separate feedbacks logic)
+// @desc    Provide feedback
 // @route   POST /api/mentor/startups/:id/feedback
 // @access  Private (Mentor only)
 export const provideFeedback = async (req, res, next) => {
@@ -28,41 +37,26 @@ export const provideFeedback = async (req, res, next) => {
         const startup_id = req.params.id;
         const mentor_id = req.user.id;
 
-        // Ensure file was handled by multer if present
         const document_url = req.file ? `/uploads/${req.file.filename}` : null;
 
-        // Verify assignment
-        const [assignments] = await pool.query('SELECT * FROM mentor_assignments WHERE startup_id = ? AND mentor_id = ?', [startup_id, mentor_id]);
-        if (assignments.length === 0) {
+        const assignment = await MentorAssignment.findOne({ startup_id, mentor_id });
+        if (!assignment) {
             return res.status(403).json({ success: false, message: 'You are not assigned to this startup' });
         }
 
-        // Create table supporting document_url
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS feedbacks (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                startup_id INT NOT NULL,
-                mentor_id INT NOT NULL,
-                review_type VARCHAR(255) DEFAULT 'Weekly Review',
-                rating INT DEFAULT 5,
-                comment TEXT NOT NULL,
-                document_url VARCHAR(255) NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (startup_id) REFERENCES startups(id) ON DELETE CASCADE,
-                FOREIGN KEY (mentor_id) REFERENCES users(id) ON DELETE CASCADE
-            )
-        `);
-
-        // Check columns to ensure backwards compatibility individually
-        try { await pool.query('ALTER TABLE feedbacks ADD COLUMN review_type VARCHAR(255) DEFAULT "Weekly Review"'); } catch (e) { /* ignore */ }
-        try { await pool.query('ALTER TABLE feedbacks ADD COLUMN rating INT DEFAULT 5'); } catch (e) { /* ignore */ }
-        try { await pool.query('ALTER TABLE feedbacks ADD COLUMN document_url VARCHAR(255) NULL'); } catch (e) { /* ignore */ }
-
-        await pool.query('INSERT INTO feedbacks (startup_id, mentor_id, review_type, rating, comment, document_url) VALUES (?, ?, ?, ?, ?, ?)', [startup_id, mentor_id, review_type, rating, feedback, document_url]);
+        const newFeedback = new Feedback({
+            startup_id,
+            mentor_id,
+            review_type,
+            rating,
+            comment: feedback,
+            document_url
+        });
+        await newFeedback.save();
 
         const completed = mark_completed === 'true' || mark_completed === true;
         if (completed) {
-            await pool.query('UPDATE startups SET status = "Completed" WHERE id = ?', [startup_id]);
+            await Startup.findByIdAndUpdate(startup_id, { status: 'Completed' });
         }
 
         res.status(201).json({ success: true, message: 'Feedback provided successfully' });
@@ -79,14 +73,15 @@ export const getStartupProgress = async (req, res, next) => {
         const startup_id = req.params.id;
         const mentor_id = req.user.id;
 
-        // Verify assignment
-        const [assignments] = await pool.query('SELECT * FROM mentor_assignments WHERE startup_id = ? AND mentor_id = ?', [startup_id, mentor_id]);
-        if (assignments.length === 0) {
+        const assignment = await MentorAssignment.findOne({ startup_id, mentor_id });
+        if (!assignment) {
             return res.status(403).json({ success: false, message: 'You are not assigned to this startup' });
         }
 
-        const [progress] = await pool.query('SELECT * FROM progress_updates WHERE startup_id = ? ORDER BY created_at DESC', [startup_id]);
-        res.status(200).json({ success: true, count: progress.length, data: progress });
+        const progress = await ProgressUpdate.find({ startup_id }).sort({ created_at: -1 }).lean();
+        const formattedProgress = progress.map(p => ({ ...p, id: p._id }));
+
+        res.status(200).json({ success: true, count: formattedProgress.length, data: formattedProgress });
     } catch (error) {
         next(error);
     }
@@ -97,43 +92,16 @@ export const getStartupProgress = async (req, res, next) => {
 // @access  Private (Mentor only)
 export const getDevelopers = async (req, res, next) => {
     try {
-        const query = `
-            SELECT id, name, email 
-            FROM users 
-            WHERE role = 'Developer'
-            ORDER BY name ASC
-        `;
-        const [developers] = await pool.query(query);
-        res.status(200).json({ success: true, count: developers.length, data: developers });
+        const developers = await User.find({ role: 'Developer' })
+            .select('name email')
+            .sort({ name: 1 })
+            .lean();
+
+        const formatted = developers.map(d => ({ ...d, id: d._id }));
+        res.status(200).json({ success: true, count: formatted.length, data: formatted });
     } catch (error) {
         next(error);
     }
-};
-
-// Shared utility to ensure table exists
-export const ensureDeveloperTasksTable = async () => {
-    await pool.query(`
-        CREATE TABLE IF NOT EXISTS developer_tasks (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            startup_id INT NOT NULL,
-            developer_id INT NOT NULL,
-            mentor_id INT NOT NULL,
-            title VARCHAR(255) NOT NULL,
-            description TEXT NOT NULL,
-            deadline DATE NOT NULL,
-            review_type VARCHAR(255) DEFAULT 'Weekly Review',
-            github_link VARCHAR(255),
-            work_completion_file VARCHAR(255),
-            status ENUM('Assigned', 'Submitted', 'Completed', 'Changes Requested') DEFAULT 'Assigned',
-            feedback TEXT,
-            extension_requested BOOLEAN DEFAULT false,
-            extension_reason TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (startup_id) REFERENCES startups(id) ON DELETE CASCADE,
-            FOREIGN KEY (developer_id) REFERENCES users(id) ON DELETE CASCADE,
-            FOREIGN KEY (mentor_id) REFERENCES users(id) ON DELETE CASCADE
-        )
-    `);
 };
 
 // @desc    Assign a target/task to an accepted developer
@@ -145,41 +113,29 @@ export const assignTaskToDeveloper = async (req, res, next) => {
         const startup_id = req.params.id;
         const mentor_id = req.user.id;
 
-        // Verify assignment to startup
-        const [assignments] = await pool.query('SELECT * FROM mentor_assignments WHERE startup_id = ? AND mentor_id = ?', [startup_id, mentor_id]);
-        if (assignments.length === 0) {
+        const assignment = await MentorAssignment.findOne({ startup_id, mentor_id });
+        if (!assignment) {
             return res.status(403).json({ success: false, message: 'You are not assigned to this startup' });
         }
 
-        // Schema update for developer tasks (Will create the new columns if they don't exist yet via ALTER)
-        await ensureDeveloperTasksTable();
-
-        try {
-            await pool.query('ALTER TABLE developer_tasks ADD COLUMN review_type VARCHAR(255) DEFAULT "Weekly Review"');
-            await pool.query('ALTER TABLE developer_tasks ADD COLUMN work_completion_file VARCHAR(255)');
-        } catch (e) {
-            // Columns likely already exist, ignore error from ALTER TABLE
-        }
-
-        // Check if startup already has a developer assigned via previous tasks
-        const [existingTasks] = await pool.query('SELECT developer_id FROM developer_tasks WHERE startup_id = ? LIMIT 1', [startup_id]);
-        
+        const existingTask = await DeveloperTask.findOne({ startup_id });
         let finalDeveloperId = developer_id;
-        if (existingTasks.length > 0) {
-            // Force the new task to use the already assigned developer
-            finalDeveloperId = existingTasks[0].developer_id;
+        if (existingTask) {
+            finalDeveloperId = existingTask.developer_id;
         }
 
-        await pool.query(
-            'INSERT INTO developer_tasks (startup_id, developer_id, mentor_id, title, description, deadline, review_type) VALUES (?, ?, ?, ?, ?, ?, ?)',
-            [startup_id, finalDeveloperId, mentor_id, title, description, deadline, review_type]
-        );
+        const newTask = new DeveloperTask({
+            startup_id,
+            developer_id: finalDeveloperId,
+            mentor_id,
+            title,
+            description,
+            deadline,
+            review_type
+        });
+        await newTask.save();
 
-        // Update the startup's status to 'Ongoing' since a developer is now working on it
-        await pool.query(
-            'UPDATE startups SET status = "Ongoing" WHERE id = ?',
-            [startup_id]
-        );
+        await Startup.findByIdAndUpdate(startup_id, { status: "Ongoing" });
 
         res.status(201).json({ success: true, message: 'Target assigned to developer successfully' });
     } catch (error) {
@@ -193,20 +149,23 @@ export const assignTaskToDeveloper = async (req, res, next) => {
 export const getAssignedTasksForMentor = async (req, res, next) => {
     try {
         const mentor_id = req.user.id;
-        const query = `
-            SELECT t.*, s.title as startup_title, u.name as developer_name 
-            FROM developer_tasks t
-            JOIN startups s ON t.startup_id = s.id
-            JOIN users u ON t.developer_id = u.id
-            WHERE t.mentor_id = ?
-            ORDER BY t.created_at DESC
-        `;
-        const [tasks] = await pool.query(query, [mentor_id]);
-        res.status(200).json({ success: true, count: tasks.length, data: tasks });
+        const tasks = await DeveloperTask.find({ mentor_id })
+            .populate('startup_id', 'title')
+            .populate('developer_id', 'name')
+            .sort({ created_at: -1 })
+            .lean();
+
+        const formattedTasks = tasks.map(t => ({
+            ...t,
+            id: t._id,
+            startup_title: t.startup_id ? t.startup_id.title : null,
+            startup_id: t.startup_id ? t.startup_id._id : null,
+            developer_name: t.developer_id ? t.developer_id.name : null,
+            developer_id: t.developer_id ? t.developer_id._id : null
+        }));
+
+        res.status(200).json({ success: true, count: formattedTasks.length, data: formattedTasks });
     } catch (error) {
-        if (error.code === 'ER_NO_SUCH_TABLE') {
-            return res.status(200).json({ success: true, count: 0, data: [] });
-        }
         next(error);
     }
 };
@@ -224,12 +183,13 @@ export const evaluateTask = async (req, res, next) => {
             return res.status(400).json({ success: false, message: 'Invalid evaluation status' });
         }
 
-        const [result] = await pool.query(
-            'UPDATE developer_tasks SET status = ?, feedback = ? WHERE id = ? AND mentor_id = ?',
-            [status, feedback, task_id, mentor_id]
+        const task = await DeveloperTask.findOneAndUpdate(
+            { _id: task_id, mentor_id },
+            { status, feedback },
+            { new: true }
         );
 
-        if (result.affectedRows === 0) {
+        if (!task) {
             return res.status(404).json({ success: false, message: 'Task not found or unauthorized' });
         }
 
@@ -256,25 +216,23 @@ export const handleTaskExtension = async (req, res, next) => {
             return res.status(400).json({ success: false, message: 'Reason required for denial' });
         }
 
+        const task = await DeveloperTask.findOne({ _id: task_id, mentor_id });
+        if (!task) {
+            return res.status(404).json({ success: false, message: 'Task not found or unauthorized' });
+        }
+
         if (approve) {
-            let feedbackUpdate = '';
-            let params = [new_deadline, task_id, mentor_id];
-
-            if (message && message.trim() !== '') {
-                feedbackUpdate = ', feedback = CONCAT(IFNULL(feedback, ""), ?)';
-                params = [new_deadline, `\n\n[Extension Approved]: ${message}`, task_id, mentor_id];
-            }
-
-            await pool.query(
-                `UPDATE developer_tasks SET deadline = ?, extension_requested = false, extension_reason = NULL${feedbackUpdate} WHERE id = ? AND mentor_id = ?`,
-                params
-            );
+            const newFeedback = message && message.trim() !== '' ? `\n\n[Extension Approved]: ${message}` : '';
+            task.deadline = new_deadline;
+            task.extension_requested = false;
+            task.extension_reason = undefined;
+            task.feedback = (task.feedback || '') + newFeedback;
+            await task.save();
         } else {
             const denialMessage = `\n\n[Extension Denied]: ${reason}`;
-            await pool.query(
-                'UPDATE developer_tasks SET extension_requested = false, feedback = CONCAT(IFNULL(feedback, ""), ?) WHERE id = ? AND mentor_id = ?',
-                [denialMessage, task_id, mentor_id]
-            );
+            task.extension_requested = false;
+            task.feedback = (task.feedback || '') + denialMessage;
+            await task.save();
         }
 
         res.status(200).json({ success: true, message: `Extension request ${approve ? 'approved' : 'denied'}` });
@@ -296,15 +254,14 @@ export const finalizeStartup = async (req, res, next) => {
             return res.status(400).json({ success: false, message: 'Invalid status update for this endpoint' });
         }
 
-        // Verify assignment
-        const [assignments] = await pool.query('SELECT * FROM mentor_assignments WHERE startup_id = ? AND mentor_id = ?', [startup_id, mentor_id]);
-        if (assignments.length === 0) {
+        const assignment = await MentorAssignment.findOne({ startup_id, mentor_id });
+        if (!assignment) {
             return res.status(403).json({ success: false, message: 'You are not assigned to this startup' });
         }
 
-        const [result] = await pool.query('UPDATE startups SET status = "Completed" WHERE id = ?', [startup_id]);
+        const startup = await Startup.findByIdAndUpdate(startup_id, { status: "Completed" }, { new: true });
 
-        if (result.affectedRows === 0) {
+        if (!startup) {
             return res.status(404).json({ success: false, message: 'Startup not found' });
         }
 

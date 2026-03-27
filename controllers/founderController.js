@@ -1,4 +1,4 @@
-import pool from '../config/db.js';
+import Startup from '../models/Startup.js';
 
 // @desc    Submit a new startup idea
 // @route   POST /api/founder/startups
@@ -12,14 +12,20 @@ export const submitStartup = async (req, res, next) => {
             return res.status(400).json({ success: false, message: 'Please provide all required fields' });
         }
 
-        const [result] = await pool.query(
-            'INSERT INTO startups (founder_id, title, description, category, funding_required, status) VALUES (?, ?, ?, ?, ?, "Pending")',
-            [founder_id, title, description, category, funding_required || 0.00]
-        );
+        const newStartup = new Startup({
+            founder_id,
+            title,
+            description,
+            category,
+            funding_required: funding_required || 0.00,
+            status: 'Pending'
+        });
+
+        const result = await newStartup.save();
 
         res.status(201).json({
             success: true,
-            data: { id: result.insertId, title, status: 'Pending' }
+            data: { id: result._id, title, status: 'Pending' }
         });
     } catch (error) {
         next(error);
@@ -32,12 +38,14 @@ export const submitStartup = async (req, res, next) => {
 export const getMyStartups = async (req, res, next) => {
     try {
         const founder_id = req.user.id;
-        const [startups] = await pool.query('SELECT * FROM startups WHERE founder_id = ? ORDER BY created_at DESC', [founder_id]);
+        const startups = await Startup.find({ founder_id }).sort({ created_at: -1 }).lean();
+
+        const formattedStartups = startups.map(s => ({ ...s, id: s._id }));
 
         res.status(200).json({
             success: true,
-            count: startups.length,
-            data: startups
+            count: formattedStartups.length,
+            data: formattedStartups
         });
     } catch (error) {
         next(error);
@@ -53,17 +61,21 @@ export const updateStartup = async (req, res, next) => {
         const startup_id = req.params.id;
         const founder_id = req.user.id;
 
-        // Check if startup exists and belongs to founder
-        const [startups] = await pool.query('SELECT * FROM startups WHERE id = ? AND founder_id = ?', [startup_id, founder_id]);
+        const updateFields = {};
+        if (title !== undefined) updateFields.title = title;
+        if (description !== undefined) updateFields.description = description;
+        if (category !== undefined) updateFields.category = category;
+        if (funding_required !== undefined) updateFields.funding_required = funding_required;
 
-        if (startups.length === 0) {
+        const startup = await Startup.findOneAndUpdate(
+            { _id: startup_id, founder_id },
+            { $set: updateFields },
+            { new: true }
+        );
+
+        if (!startup) {
             return res.status(404).json({ success: false, message: 'Startup not found or unauthorized' });
         }
-
-        await pool.query(
-            'UPDATE startups SET title = COALESCE(?, title), description = COALESCE(?, description), category = COALESCE(?, category), funding_required = COALESCE(?, funding_required) WHERE id = ?',
-            [title, description, category, funding_required, startup_id]
-        );
 
         res.status(200).json({ success: true, message: 'Startup updated successfully' });
     } catch (error) {

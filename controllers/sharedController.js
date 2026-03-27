@@ -1,4 +1,4 @@
-import pool from '../config/db.js';
+import DeveloperTask from '../models/DeveloperTask.js';
 
 // @desc    Get review history for a startup
 // @route   GET /api/shared/startups/:id/reviews
@@ -7,20 +7,25 @@ export const getStartupReviews = async (req, res, next) => {
     try {
         const startup_id = req.params.id;
 
-        const query = `
-            SELECT t.*, m.name as mentor_name, d.name as developer_name, s.title as startup_title
-            FROM developer_tasks t
-            JOIN startups s ON t.startup_id = s.id
-            LEFT JOIN mentor_assignments ma ON s.id = ma.startup_id
-            LEFT JOIN users m ON ma.mentor_id = m.id
-            LEFT JOIN users d ON t.developer_id = d.id
-            WHERE t.startup_id = ?
-            ORDER BY t.created_at DESC
-        `;
+        const reviews = await DeveloperTask.find({ startup_id })
+            .populate('startup_id', 'title')
+            .populate('mentor_id', 'name')
+            .populate('developer_id', 'name')
+            .sort({ created_at: -1 })
+            .lean();
 
-        const [reviews] = await pool.query(query, [startup_id]);
+        const formattedReviews = reviews.map(r => ({
+            ...r,
+            id: r._id,
+            startup_title: r.startup_id ? r.startup_id.title : null,
+            startup_id: r.startup_id ? r.startup_id._id : null,
+            mentor_name: r.mentor_id ? r.mentor_id.name : null,
+            mentor_id: r.mentor_id ? r.mentor_id._id : null,
+            developer_name: r.developer_id ? r.developer_id.name : null,
+            developer_id: r.developer_id ? r.developer_id._id : null
+        }));
 
-        res.status(200).json({ success: true, count: reviews.length, data: reviews });
+        res.status(200).json({ success: true, count: formattedReviews.length, data: formattedReviews });
     } catch (error) {
         next(error);
     }

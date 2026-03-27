@@ -3,6 +3,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import cors from 'cors';
 import dotenv from 'dotenv';
+import connectDB from './config/db.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import authRoutes from './routes/authRoutes.js';
 import founderRoutes from './routes/founderRoutes.js';
@@ -13,6 +14,9 @@ import fundingRoutes from './routes/fundingRoutes.js';
 import analyticsRoutes from './routes/analyticsRoutes.js';
 
 dotenv.config();
+
+// Connect to MongoDB
+connectDB();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);

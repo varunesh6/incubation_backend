@@ -1,4 +1,5 @@
-import pool from '../config/db.js';
+import DeveloperTask from '../models/DeveloperTask.js';
+import Startup from '../models/Startup.js';
 
 // @desc    Get tasks assigned to me
 // @route   GET /api/developer/tasks
@@ -15,19 +16,21 @@ export const getMyTasks = async (req, res, next) => {
             return res.status(200).json({ success: true, count: 0, data: [] });
         }
 
-        const query = `
-            SELECT t.*, s.title as startup_title, s.status as startup_status
-            FROM developer_tasks t
-            JOIN startups s ON t.startup_id = s.id
-            WHERE t.developer_id = ?
-            ORDER BY t.created_at DESC
-        `;
-        const [tasks] = await pool.query(query, [developer_id]);
-        res.status(200).json({ success: true, count: tasks.length, data: tasks });
+        const tasks = await DeveloperTask.find({ developer_id })
+            .populate('startup_id', 'title status')
+            .sort({ created_at: -1 })
+            .lean();
+
+        const formattedTasks = tasks.map(t => ({
+            ...t,
+            id: t._id,
+            startup_title: t.startup_id ? t.startup_id.title : null,
+            startup_status: t.startup_id ? t.startup_id.status : null,
+            startup_id: t.startup_id ? t.startup_id._id : null
+        }));
+
+        res.status(200).json({ success: true, count: formattedTasks.length, data: formattedTasks });
     } catch (error) {
-        if (error.code === 'ER_NO_SUCH_TABLE') {
-            return res.status(200).json({ success: true, count: 0, data: [] });
-        }
         next(error);
     }
 };
@@ -45,15 +48,16 @@ export const submitTaskProgress = async (req, res, next) => {
         if (req.file) {
             work_completion_file = `/uploads/${req.file.filename}`;
         } else if (req.body.work_completion_file) {
-            work_completion_file = req.body.work_completion_file; // Fallback to provided link
+            work_completion_file = req.body.work_completion_file;
         }
 
-        const [result] = await pool.query(
-            'UPDATE developer_tasks SET status = "Submitted", github_link = ?, work_completion_file = ? WHERE id = ? AND developer_id = ?',
-            [github_link, work_completion_file, task_id, developer_id]
+        const task = await DeveloperTask.findOneAndUpdate(
+            { _id: task_id, developer_id },
+            { status: 'Submitted', github_link, work_completion_file },
+            { new: true }
         );
 
-        if (result.affectedRows === 0) {
+        if (!task) {
             return res.status(404).json({ success: false, message: 'Task not found or unauthorized' });
         }
 
@@ -76,12 +80,13 @@ export const requestExtension = async (req, res, next) => {
             return res.status(400).json({ success: false, message: 'Please provide a reason for the extension' });
         }
 
-        const [result] = await pool.query(
-            'UPDATE developer_tasks SET extension_requested = true, extension_reason = ? WHERE id = ? AND developer_id = ? AND status != "Completed"',
-            [reason, task_id, developer_id]
+        const task = await DeveloperTask.findOneAndUpdate(
+            { _id: task_id, developer_id, status: { $ne: 'Completed' } },
+            { extension_requested: true, extension_reason: reason },
+            { new: true }
         );
 
-        if (result.affectedRows === 0) {
+        if (!task) {
             return res.status(400).json({ success: false, message: 'Task not found or already completed/unauthorized' });
         }
 
