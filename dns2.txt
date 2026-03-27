@@ -1,0 +1,6 @@
+﻿Server:  dns.google
+Address:  8.8.8.8
+
+portal.pggzekr.mongodb.net	text =
+
+	"authSource=admin&replicaSet=atlas-usbc3s-shard-0"
